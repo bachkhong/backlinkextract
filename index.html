@@ -215,16 +215,16 @@
   <header>
     <p class="eyebrow">// Backlink Extractor</p>
     <h1>Trích danh sách backlink từ file export</h1>
-    <p class="sub">Kéo thả file CSV / Excel (kiểu export Ahrefs, Semrush...) vào bên dưới. Công cụ tự lấy dữ liệu ở cột B, bạn có thể đổi sang cột khác và bấm copy toàn bộ.</p>
+    <p class="sub">Kéo thả file export SEO vào bên dưới. Công cụ hỗ trợ nhiều định dạng, tự nhận diện các cột backlink phổ biến và bạn vẫn có thể đổi sang bất kỳ cột nào trước khi Copy All.</p>
   </header>
 
   <div class="drop" id="drop">
-    <input type="file" id="fileInput" accept=".csv,.xlsx,.xls,.tsv">
+    <input type="file" id="fileInput" accept=".csv,.tsv,.txt,.xlsx,.xls,.xlsm,.xlsb,.ods">
     <div class="drop-icon">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
     </div>
     <div class="drop-title">Thả file vào đây, hoặc bấm để chọn</div>
-    <div class="drop-sub">.csv · .xlsx · .xls · .tsv</div>
+    <div class="drop-sub">.csv · .tsv · .txt · .xlsx · .xls · .xlsm · .xlsb · .ods</div>
   </div>
 
   <div class="filebar" id="filebar">
@@ -409,6 +409,35 @@ function parseDelimited(text, delimiter){
   return result;
 }
 
+
+function ensureWorksheetRange(ws){
+  // Một số tool SEO export XLSX không ghi <dimension>, khiến SheetJS
+  // đọc được cell nhưng worksheet không có !ref và sheet_to_json trả rỗng.
+  if(ws['!ref']) return;
+
+  const cellKeys = Object.keys(ws).filter(k => k[0] !== '!');
+  if(cellKeys.length === 0) return;
+
+  let minR = Infinity, minC = Infinity, maxR = -1, maxC = -1;
+
+  cellKeys.forEach(address => {
+    try{
+      const cell = XLSX.utils.decode_cell(address);
+      minR = Math.min(minR, cell.r);
+      minC = Math.min(minC, cell.c);
+      maxR = Math.max(maxR, cell.r);
+      maxC = Math.max(maxC, cell.c);
+    }catch(_){}
+  });
+
+  if(maxR >= 0 && maxC >= 0){
+    ws['!ref'] = XLSX.utils.encode_range({
+      s: {r:minR, c:minC},
+      e: {r:maxR, c:maxC}
+    });
+  }
+}
+
 function handleFile(file){
   clearError();
 
@@ -442,7 +471,16 @@ function handleFile(file){
         const wb = XLSX.read(data, {type:'array'});
         const firstSheet = wb.SheetNames[0];
         const ws = wb.Sheets[firstSheet];
-        rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:'', raw:false});
+
+        // Fix malformed/atypical SEO exports that omit worksheet dimensions.
+        ensureWorksheetRange(ws);
+
+        rows = XLSX.utils.sheet_to_json(ws, {
+          header:1,
+          defval:'',
+          raw:false,
+          blankrows:false
+        });
       }
 
       rows = rows.filter(r => Array.isArray(r) && r.some(c => String(c).trim() !== ''));
@@ -478,10 +516,27 @@ function buildColumnOptions(){
     opt.textContent = `Cột ${colLetter(i)} — ${label}`;
     colSelect.appendChild(opt);
   }
-  // Prefer the actual Ahrefs header; fall back to column B.
-  const preferredIndex = header.findIndex(
-    h => String(h || '').trim().toLowerCase() === 'referring page url'
-  );
+  // Tự nhận diện một số tên cột backlink phổ biến.
+  // Nếu không nhận ra vẫn mặc định về cột B và người dùng có thể đổi thủ công.
+  const preferredHeaders = [
+    'referring page url',
+    'source url',
+    'source page url',
+    'backlink url',
+    'referring url'
+  ];
+
+  const normalizedHeader = header.map(h => String(h || '').trim().toLowerCase());
+  let preferredIndex = -1;
+
+  for(const name of preferredHeaders){
+    const found = normalizedHeader.indexOf(name);
+    if(found >= 0){
+      preferredIndex = found;
+      break;
+    }
+  }
+
   colSelect.value = preferredIndex >= 0 ? preferredIndex : (maxCols > 1 ? 1 : 0);
   colSelect.onchange = () => { extractColumn(); highlightPreviewColumn(); };
   extractColumn();
