@@ -291,7 +291,7 @@
     </div>
     <textarea id="output" spellcheck="false" readonly></textarea>
     <div class="large-note" id="largeNote"></div>
-    <div class="preview-toggle" id="previewToggle">▾ Xem preview backlink đã gộp</div>
+    <div class="preview-toggle" id="previewToggle">▾ Xem bảng dữ liệu gốc</div>
     <div class="preview-wrap" id="previewWrap">
       <table id="previewTable"></table>
     </div>
@@ -374,9 +374,11 @@ function setMode(multiMode){
   if(isMultiMode){
     modeNote.textContent = 'Chọn nhiều file — tool sẽ gộp cột backlink thành 1 danh sách.';
     dropTitle.textContent = 'Thả nhiều file vào đây, hoặc bấm để chọn';
+    previewToggle.textContent = '▾ Xem preview backlink đã gộp';
   }else{
     modeNote.textContent = 'Chọn 1 file và lấy linh động bất kỳ cột nào.';
     dropTitle.textContent = 'Thả file vào đây, hoặc bấm để chọn';
+    previewToggle.textContent = '▾ Xem bảng dữ liệu gốc';
   }
 
   resetAll();
@@ -1032,6 +1034,7 @@ function extractColumn(){
       missingFiles++;
       return;
     }
+
     ds.rows.slice(1).forEach(r => {
       const value = r[idx] !== undefined ? String(r[idx]).trim() : '';
       if(value) all.push({value, file:ds.name});
@@ -1039,6 +1042,7 @@ function extractColumn(){
   });
 
   let finalRows = all;
+
   if(dedupeToggle.checked){
     const seen = new Set();
     finalRows = all.filter(item => {
@@ -1048,29 +1052,81 @@ function extractColumn(){
     });
   }
 
-  mergedValues = finalRows.map(x=>x.value);
+  mergedValues = finalRows.map(x => x.value);
+
   const visible = mergedValues.slice(0, DISPLAY_LIMIT);
   output.value = visible.join('\n');
 
-  const uniqueCount = new Set(all.map(x=>x.value)).size;
-  countEl.textContent = `${datasets.length} file • ${mergedValues.length.toLocaleString('vi-VN')} dòng` +
-    (dedupeToggle.checked ? ` • từ ${all.length.toLocaleString('vi-VN')} dòng gốc` : ` • ${uniqueCount.toLocaleString('vi-VN')} unique`);
+  const uniqueCount = new Set(all.map(x => x.value)).size;
+  countEl.textContent =
+    `${datasets.length} file • ${mergedValues.length.toLocaleString('vi-VN')} dòng` +
+    (dedupeToggle.checked
+      ? ` • từ ${all.length.toLocaleString('vi-VN')} dòng gốc`
+      : ` • ${uniqueCount.toLocaleString('vi-VN')} unique`);
 
   if(mergedValues.length > DISPLAY_LIMIT){
-    largeNote.textContent = `Đang hiển thị ${DISPLAY_LIMIT.toLocaleString('vi-VN')} dòng đầu để tránh lag. Copy All vẫn copy đủ ${mergedValues.length.toLocaleString('vi-VN')} dòng.`;
+    largeNote.textContent =
+      `Đang hiển thị ${DISPLAY_LIMIT.toLocaleString('vi-VN')} dòng đầu để tránh lag. ` +
+      `Copy All vẫn copy đủ ${mergedValues.length.toLocaleString('vi-VN')} dòng.`;
     largeNote.classList.add('show');
   }else{
     largeNote.classList.remove('show');
     largeNote.textContent = '';
   }
 
-  renderPreview(finalRows);
+  // Single file: giữ nguyên chức năng gốc — xem full bảng dữ liệu.
+  if(!isMultiMode && datasets.length === 1){
+    renderOriginalTable(datasets[0].rows, selectedIndex);
+  }else{
+    // Multi file: chỉ preview backlink đã gộp để giao diện nhẹ.
+    renderPreview(finalRows);
+  }
 
   if(missingFiles > 0){
     showError(`${missingFiles} file không tìm thấy cột “${selectedHeader}” và đã được bỏ qua.`);
   }else{
     clearError();
   }
+}
+
+function renderOriginalTable(rows, selectedIndex){
+  if(!rows || !rows.length){
+    previewTable.innerHTML = '';
+    return;
+  }
+
+  const maxCols = Math.max(...rows.map(r => r.length));
+  let html = '<thead><tr>';
+
+  for(let i = 0; i < maxCols; i++){
+    const label =
+      rows[0][i] !== undefined && String(rows[0][i]).trim() !== ''
+        ? String(rows[0][i]).trim()
+        : colLetter(i);
+
+    html += `<th data-col="${i}" class="${i === selectedIndex ? 'hl' : ''}">${escapeHtml(label)}</th>`;
+  }
+
+  html += '</tr></thead><tbody>';
+
+  // Full table như bản gốc. Không giới hạn 50 dòng ở single mode.
+  rows.slice(1).forEach(r => {
+    html += '<tr>';
+
+    for(let i = 0; i < maxCols; i++){
+      const value = r[i] !== undefined ? String(r[i]) : '';
+      html += `<td data-col="${i}" class="${i === selectedIndex ? 'hl' : ''}">${escapeHtml(value)}</td>`;
+    }
+
+    html += '</tr>';
+  });
+
+  html += '</tbody>';
+  previewTable.innerHTML = html;
+
+  previewToggle.textContent = previewWrap.classList.contains('show')
+    ? '▴ Ẩn bảng dữ liệu gốc'
+    : '▾ Xem bảng dữ liệu gốc';
 }
 
 function renderPreview(items){
@@ -1088,7 +1144,14 @@ function escapeHtml(s){
 
 previewToggle.addEventListener('click', ()=>{
   const isShown = previewWrap.classList.toggle('show');
-  previewToggle.textContent = (isShown ? '▴ Ẩn bảng dữ liệu gốc' : '▾ Xem preview backlink đã gộp');
+
+  if(!isMultiMode && datasets.length === 1){
+    previewToggle.textContent =
+      isShown ? '▴ Ẩn bảng dữ liệu gốc' : '▾ Xem bảng dữ liệu gốc';
+  }else{
+    previewToggle.textContent =
+      isShown ? '▴ Ẩn preview backlink đã gộp' : '▾ Xem preview backlink đã gộp';
+  }
 });
 
 async function copyAllText(){
