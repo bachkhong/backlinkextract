@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Trích Backlink</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/SheetJS/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root{
     --bg: #0f1512;
@@ -208,6 +207,42 @@
     color:var(--ink-dim);
     font-family:var(--mono);
   }
+
+  #dedupeToggle{accent-color:var(--accent);}
+  .large-note{padding:10px 20px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--ink-dim);display:none;}
+  .large-note.show{display:block;}
+
+  .mode-switch{
+    margin-top:24px;
+    display:flex;
+    align-items:center;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  .mode-btn{
+    border:1px solid var(--line);
+    background:var(--panel);
+    color:var(--ink-dim);
+    border-radius:8px;
+    padding:8px 13px;
+    font-family:var(--mono);
+    font-size:12px;
+    cursor:pointer;
+  }
+  .mode-btn:hover{color:var(--ink);border-color:var(--accent-dim);}
+  .mode-btn.active{
+    background:var(--accent);
+    border-color:var(--accent);
+    color:#0b1310;
+    font-weight:700;
+  }
+  .mode-note{
+    margin-left:4px;
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--ink-dim);
+  }
+
 </style>
 </head>
 <body>
@@ -215,22 +250,29 @@
   <header>
     <p class="eyebrow">// Backlink Extractor</p>
     <h1>Trích danh sách backlink từ file export</h1>
-    <p class="sub">Kéo thả file export SEO vào bên dưới. CSV/TSV/TXT/XLSX/XLSM/ODS được đọc trực tiếp trong trình duyệt, không cần Excel; bạn vẫn có thể đổi sang bất kỳ cột nào trước khi Copy All.</p>
+    <p class="sub">Dùng 1 file như bình thường hoặc bật Multi file để gộp backlink từ nhiều file thành một cột. Công cụ tự nhận diện các cột phổ biến như Source url / Referring page URL, nhưng bạn vẫn có thể chọn cột thủ công.</p>
   </header>
 
+
+  <div class="mode-switch" aria-label="Chế độ tải file">
+    <button type="button" class="mode-btn active" id="singleModeBtn">1 file</button>
+    <button type="button" class="mode-btn" id="multiModeBtn">Multi file</button>
+    <span class="mode-note" id="modeNote">Chọn 1 file và lấy linh động bất kỳ cột nào.</span>
+  </div>
+
   <div class="drop" id="drop">
-    <input type="file" id="fileInput" accept=".csv,.tsv,.txt,.xlsx,.xls,.xlsm,.xlsb,.ods">
+    <input type="file" id="fileInput" accept=".csv,.tsv,.txt,.xlsx,.xlsm,.ods,.xls,.xlsb">
     <div class="drop-icon">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
     </div>
-    <div class="drop-title">Thả file vào đây, hoặc bấm để chọn</div>
+    <div class="drop-title" id="dropTitle">Thả file vào đây, hoặc bấm để chọn</div>
     <div class="drop-sub">.csv · .tsv · .txt · .xlsx · .xlsm · .ods · .xls · .xlsb</div>
   </div>
 
   <div class="filebar" id="filebar">
     <span class="name" id="fname"></span>
     <span class="meta" id="fmeta"></span>
-    <button id="clearBtn">Xóa, chọn file khác</button>
+    <button id="clearBtn">Xóa tất cả</button>
   </div>
 
   <div class="error" id="error"></div>
@@ -240,18 +282,22 @@
       <div class="colpick">
         <label for="colSelect">Lấy cột</label>
         <select id="colSelect"></select>
+        <label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;cursor:pointer;">
+          <input type="checkbox" id="dedupeToggle"> Xóa backlink trùng
+        </label>
         <span class="count" id="count"></span>
       </div>
       <button class="copybtn" id="copyBtn">Copy All</button>
     </div>
     <textarea id="output" spellcheck="false" readonly></textarea>
-    <div class="preview-toggle" id="previewToggle">▾ Xem bảng dữ liệu gốc</div>
+    <div class="large-note" id="largeNote"></div>
+    <div class="preview-toggle" id="previewToggle">▾ Xem preview backlink đã gộp</div>
     <div class="preview-wrap" id="previewWrap">
       <table id="previewTable"></table>
     </div>
   </div>
 
-  <footer>Xử lý hoàn toàn trong trình duyệt — file không được tải lên đâu cả.</footer>
+  <footer>Xử lý trong trình duyệt — CSV/XLSX không cần Excel và dữ liệu không được tải lên máy chủ.</footer>
 </div>
 
 <script>
@@ -270,8 +316,28 @@ const errorEl = document.getElementById('error');
 const previewToggle = document.getElementById('previewToggle');
 const previewWrap = document.getElementById('previewWrap');
 const previewTable = document.getElementById('previewTable');
+const dedupeToggle = document.getElementById('dedupeToggle');
+const largeNote = document.getElementById('largeNote');
+const singleModeBtn = document.getElementById('singleModeBtn');
+const multiModeBtn = document.getElementById('multiModeBtn');
+const modeNote = document.getElementById('modeNote');
+const dropTitle = document.getElementById('dropTitle');
 
-let rows = []; // array of arrays, row[0] = header
+let datasets = [];        // [{name, rows}]
+let mergedValues = [];    // values currently shown/copied
+let firstRows = [];       // first valid file, used to build column picker
+const DISPLAY_LIMIT = 20000;
+let isMultiMode = false;
+
+const BACKLINK_HEADER_ALIASES = [
+  'referring page url',
+  'source url',
+  'source page url',
+  'backlink url',
+  'referring url',
+  'referring page',
+  'source page'
+];
 
 function showError(msg){
   errorEl.textContent = msg;
@@ -286,9 +352,38 @@ function resetAll(){
   filebar.classList.remove('show');
   panel.classList.remove('show');
   previewWrap.classList.remove('show');
+  largeNote.classList.remove('show');
+  largeNote.textContent = '';
   clearError();
-  rows = [];
+  datasets = [];
+  mergedValues = [];
+  firstRows = [];
+  output.value = '';
+  previewTable.innerHTML = '';
+  dedupeToggle.checked = false;
 }
+
+
+function setMode(multiMode){
+  isMultiMode = !!multiMode;
+  fileInput.multiple = isMultiMode;
+
+  singleModeBtn.classList.toggle('active', !isMultiMode);
+  multiModeBtn.classList.toggle('active', isMultiMode);
+
+  if(isMultiMode){
+    modeNote.textContent = 'Chọn nhiều file — tool sẽ gộp cột backlink thành 1 danh sách.';
+    dropTitle.textContent = 'Thả nhiều file vào đây, hoặc bấm để chọn';
+  }else{
+    modeNote.textContent = 'Chọn 1 file và lấy linh động bất kỳ cột nào.';
+    dropTitle.textContent = 'Thả file vào đây, hoặc bấm để chọn';
+  }
+
+  resetAll();
+}
+
+singleModeBtn.addEventListener('click', () => setMode(false));
+multiModeBtn.addEventListener('click', () => setMode(true));
 
 ['dragenter','dragover'].forEach(evt=>{
   drop.addEventListener(evt, e=>{ e.preventDefault(); drop.classList.add('drag'); });
@@ -297,16 +392,22 @@ function resetAll(){
   drop.addEventListener(evt, e=>{ e.preventDefault(); drop.classList.remove('drag'); });
 });
 drop.addEventListener('drop', e=>{
-  const f = e.dataTransfer.files[0];
-  if(f) handleFile(f);
+  let files = Array.from(e.dataTransfer.files || []);
+  if(!isMultiMode) files = files.slice(0, 1);
+  if(files.length) handleFiles(files);
 });
 drop.addEventListener('click', ()=> fileInput.click());
 fileInput.addEventListener('change', e=>{
-  if(e.target.files[0]) handleFile(e.target.files[0]);
+  let files = Array.from(e.target.files || []);
+  if(!isMultiMode) files = files.slice(0, 1);
+  if(files.length) handleFiles(files);
 });
 clearBtn.addEventListener('click', e=>{
   e.stopPropagation();
   resetAll();
+});
+dedupeToggle.addEventListener('change', ()=>{
+  if(datasets.length) extractColumn();
 });
 
 function colLetter(idx){
@@ -408,7 +509,6 @@ function parseDelimited(text, delimiter){
 
   return result;
 }
-
 
 function u16(view, offset){
   return view.getUint16(offset, true);
@@ -783,140 +883,203 @@ async function parseLegacyExcel(buffer){
   });
 }
 
-function handleFile(file){
-  clearError();
+async function parseFile(file){
+  const buffer = await file.arrayBuffer();
+  const ext = getExtension(file.name);
+  let parsedRows = [];
 
-  const sizeKb = (file.size/1024).toFixed(1);
-  fname.textContent = file.name;
-  fmeta.textContent = sizeKb + ' KB';
-  filebar.classList.add('show');
+  if(ext === 'csv' || ext === 'tsv' || ext === 'txt'){
+    const text = decodeTextBuffer(buffer);
+    const delimiter = ext === 'tsv' ? '\t' : detectDelimiter(text);
+    parsedRows = parseDelimited(text, delimiter);
 
-  const reader = new FileReader();
+  }else if(ext === 'xlsx' || ext === 'xlsm'){
+    parsedRows = await parseXlsxOffline(buffer);
 
-  reader.onerror = () => {
-    showError('Không đọc được file này.');
-    panel.classList.remove('show');
-  };
+  }else if(ext === 'ods'){
+    parsedRows = await parseOdsOffline(buffer);
 
-  reader.onload = async (e) => {
-    try{
-      const buffer = e.target.result;
-      const ext = getExtension(file.name);
+  }else if(ext === 'xls' || ext === 'xlsb'){
+    parsedRows = await parseLegacyExcel(buffer);
 
-      if(ext === 'csv' || ext === 'tsv' || ext === 'txt'){
-        const text = decodeTextBuffer(buffer);
-        const delimiter = ext === 'tsv' ? '\t' : detectDelimiter(text);
-        rows = parseDelimited(text, delimiter);
+  }else{
+    throw new Error('Định dạng này chưa được hỗ trợ.');
+  }
 
-      }else if(ext === 'xlsx' || ext === 'xlsm'){
-        rows = await parseXlsxOffline(buffer);
+  parsedRows = parsedRows.filter(
+    r => Array.isArray(r) && r.some(c => String(c).trim() !== '')
+  );
 
-      }else if(ext === 'ods'){
-        rows = await parseOdsOffline(buffer);
+  if(!parsedRows.length){
+    throw new Error('File không có dữ liệu đọc được.');
+  }
 
-      }else if(ext === 'xls' || ext === 'xlsb'){
-        rows = await parseLegacyExcel(buffer);
-
-      }else{
-        throw new Error('Định dạng này chưa được hỗ trợ.');
-      }
-
-      rows = rows.filter(
-        r => Array.isArray(r) && r.some(c => String(c).trim() !== '')
-      );
-
-      if(rows.length < 1){
-        showError('File này không có dữ liệu đọc được.');
-        panel.classList.remove('show');
-        return;
-      }
-
-      buildColumnOptions();
-      renderPreview();
-      panel.classList.add('show');
-
-    }catch(err){
-      console.error(err);
-      showError('Có lỗi khi đọc file: ' + err.message);
-      panel.classList.remove('show');
-    }
-  };
-
-  reader.readAsArrayBuffer(file);
+  return {name:file.name, rows:parsedRows, size:file.size};
 }
 
+async function handleFiles(files){
+  clearError();
+  panel.classList.remove('show');
+  datasets = [];
+  mergedValues = [];
+  firstRows = [];
+
+  const supported = files.filter(f => ['csv','tsv','txt','xlsx','xlsm','ods','xls','xlsb'].includes(getExtension(f.name)));
+  if(!supported.length){
+    showError('Không có file CSV/TSV/TXT/XLSX/XLSM/ODS/XLS/XLSB hợp lệ.');
+    return;
+  }
+
+  fname.textContent = supported.length === 1
+    ? supported[0].name
+    : `${supported.length} file đã chọn`;
+  const totalKb = supported.reduce((sum,f)=>sum+f.size,0)/1024;
+  fmeta.textContent = totalKb >= 1024 ? (totalKb/1024).toFixed(1) + ' MB' : totalKb.toFixed(1) + ' KB';
+  filebar.classList.add('show');
+
+  const failed = [];
+  for(const file of supported){
+    try{
+      const ds = await parseFile(file);
+      datasets.push(ds);
+    }catch(err){
+      failed.push(`${file.name}: ${err.message}`);
+    }
+  }
+
+  if(!datasets.length){
+    showError('Không đọc được file nào. ' + failed.join(' | '));
+    return;
+  }
+
+  firstRows = datasets[0].rows;
+  buildColumnOptions();
+  panel.classList.add('show');
+
+  if(failed.length){
+    showError(`Đã đọc ${datasets.length}/${supported.length} file. File lỗi: ` + failed.join(' | '));
+  }
+}
+
+
 function buildColumnOptions(){
+  const rows = firstRows;
   const header = rows[0];
   const maxCols = Math.max(...rows.map(r=>r.length));
   colSelect.innerHTML = '';
+
   for(let i=0;i<maxCols;i++){
     const label = header[i] && String(header[i]).trim() !== '' ? String(header[i]).trim() : '(không tên)';
     const opt = document.createElement('option');
     opt.value = i;
+    opt.dataset.header = label;
     opt.textContent = `Cột ${colLetter(i)} — ${label}`;
     colSelect.appendChild(opt);
   }
-  // Tự nhận diện một số tên cột backlink phổ biến.
-  // Nếu không nhận ra vẫn mặc định về cột B và người dùng có thể đổi thủ công.
-  const preferredHeaders = [
-    'referring page url',
-    'source url',
-    'source page url',
-    'backlink url',
-    'referring url'
-  ];
 
   const normalizedHeader = header.map(h => String(h || '').trim().toLowerCase());
   let preferredIndex = -1;
 
-  for(const name of preferredHeaders){
-    const found = normalizedHeader.indexOf(name);
+  for(const alias of BACKLINK_HEADER_ALIASES){
+    const found = normalizedHeader.indexOf(alias);
     if(found >= 0){
       preferredIndex = found;
       break;
     }
   }
 
+  // Với file kiểu elifeonline, "Source url" ở cột C sẽ được chọn tự động.
+  // Nếu không nhận diện được, vẫn fallback về cột B như bản đầu.
   colSelect.value = preferredIndex >= 0 ? preferredIndex : (maxCols > 1 ? 1 : 0);
-  colSelect.onchange = () => { extractColumn(); highlightPreviewColumn(); };
+  colSelect.onchange = () => extractColumn();
   extractColumn();
 }
 
-function extractColumn(){
-  const idx = parseInt(colSelect.value, 10);
-  const values = rows.slice(1)
-    .map(r => (r[idx] !== undefined ? String(r[idx]).trim() : ''))
-    .filter(v => v !== '');
-  output.value = values.join('\n');
-  countEl.textContent = values.length + ' dòng';
+function findColumnIndex(rows, selectedIndex, selectedHeader){
+  const header = rows[0] || [];
+  const normalizedHeader = header.map(h => String(h || '').trim().toLowerCase());
+  const normalized = String(selectedHeader || '').trim().toLowerCase();
+
+  // 1) Ưu tiên đúng tên cột đã chọn.
+  if(normalized && normalized !== '(không tên)'){
+    const exact = normalizedHeader.indexOf(normalized);
+    if(exact >= 0) return exact;
+  }
+
+  // 2) Nếu cột đã chọn là cột backlink phổ biến, thử các alias tương đương.
+  // Ví dụ file 1 dùng "Source url" (C), file 2 dùng "Referring page URL" (B).
+  if(BACKLINK_HEADER_ALIASES.includes(normalized)){
+    for(const alias of BACKLINK_HEADER_ALIASES){
+      const found = normalizedHeader.indexOf(alias);
+      if(found >= 0) return found;
+    }
+  }
+
+  // 3) Cuối cùng mới dùng cùng vị trí cột A/B/C... giữa các file.
+  return selectedIndex < header.length ? selectedIndex : -1;
 }
 
-function renderPreview(){
-  const maxCols = Math.max(...rows.map(r=>r.length));
-  let html = '<thead><tr>';
-  for(let i=0;i<maxCols;i++){
-    const label = rows[0][i] && String(rows[0][i]).trim() !== '' ? String(rows[0][i]).trim() : colLetter(i);
-    html += `<th data-col="${i}">${escapeHtml(label)}</th>`;
-  }
-  html += '</tr></thead><tbody>';
-  const bodyRows = rows.slice(1, 51); // cap preview at 50 rows
-  bodyRows.forEach(r=>{
-    html += '<tr>';
-    for(let i=0;i<maxCols;i++){
-      html += `<td data-col="${i}">${escapeHtml(r[i] !== undefined ? String(r[i]) : '')}</td>`;
+function extractColumn(){
+  const selectedIndex = parseInt(colSelect.value, 10);
+  const selectedOption = colSelect.options[colSelect.selectedIndex];
+  const selectedHeader = selectedOption ? selectedOption.dataset.header : '';
+  const all = [];
+  let missingFiles = 0;
+
+  datasets.forEach(ds => {
+    const idx = findColumnIndex(ds.rows, selectedIndex, selectedHeader);
+    if(idx < 0){
+      missingFiles++;
+      return;
     }
-    html += '</tr>';
+    ds.rows.slice(1).forEach(r => {
+      const value = r[idx] !== undefined ? String(r[idx]).trim() : '';
+      if(value) all.push({value, file:ds.name});
+    });
+  });
+
+  let finalRows = all;
+  if(dedupeToggle.checked){
+    const seen = new Set();
+    finalRows = all.filter(item => {
+      if(seen.has(item.value)) return false;
+      seen.add(item.value);
+      return true;
+    });
+  }
+
+  mergedValues = finalRows.map(x=>x.value);
+  const visible = mergedValues.slice(0, DISPLAY_LIMIT);
+  output.value = visible.join('\n');
+
+  const uniqueCount = new Set(all.map(x=>x.value)).size;
+  countEl.textContent = `${datasets.length} file • ${mergedValues.length.toLocaleString('vi-VN')} dòng` +
+    (dedupeToggle.checked ? ` • từ ${all.length.toLocaleString('vi-VN')} dòng gốc` : ` • ${uniqueCount.toLocaleString('vi-VN')} unique`);
+
+  if(mergedValues.length > DISPLAY_LIMIT){
+    largeNote.textContent = `Đang hiển thị ${DISPLAY_LIMIT.toLocaleString('vi-VN')} dòng đầu để tránh lag. Copy All vẫn copy đủ ${mergedValues.length.toLocaleString('vi-VN')} dòng.`;
+    largeNote.classList.add('show');
+  }else{
+    largeNote.classList.remove('show');
+    largeNote.textContent = '';
+  }
+
+  renderPreview(finalRows);
+
+  if(missingFiles > 0){
+    showError(`${missingFiles} file không tìm thấy cột “${selectedHeader}” và đã được bỏ qua.`);
+  }else{
+    clearError();
+  }
+}
+
+function renderPreview(items){
+  let html = '<thead><tr><th>#</th><th>File nguồn</th><th class="hl">Backlink</th></tr></thead><tbody>';
+  items.slice(0,50).forEach((item,i)=>{
+    html += `<tr><td>${i+1}</td><td>${escapeHtml(item.file)}</td><td class="hl">${escapeHtml(item.value)}</td></tr>`;
   });
   html += '</tbody>';
   previewTable.innerHTML = html;
-  highlightPreviewColumn();
-}
-
-function highlightPreviewColumn(){
-  const idx = colSelect.value;
-  document.querySelectorAll('#previewTable [data-col]').forEach(el=>{
-    el.classList.toggle('hl', el.getAttribute('data-col') === String(idx));
-  });
 }
 
 function escapeHtml(s){
@@ -925,11 +1088,11 @@ function escapeHtml(s){
 
 previewToggle.addEventListener('click', ()=>{
   const isShown = previewWrap.classList.toggle('show');
-  previewToggle.textContent = (isShown ? '▴ Ẩn bảng dữ liệu gốc' : '▾ Xem bảng dữ liệu gốc');
+  previewToggle.textContent = (isShown ? '▴ Ẩn bảng dữ liệu gốc' : '▾ Xem preview backlink đã gộp');
 });
 
 async function copyAllText(){
-  const text = output.value;
+  const text = mergedValues.join('\n');
 
   if(!text){
     throw new Error('Không có dữ liệu để copy.');
@@ -979,6 +1142,8 @@ copyBtn.addEventListener('click', async ()=>{
     copyBtn.classList.remove('done');
   }, 1600);
 });
+
+setMode(false);
 </script>
 </body>
 </html>
