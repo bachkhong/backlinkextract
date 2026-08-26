@@ -215,7 +215,7 @@
   <header>
     <p class="eyebrow">// Backlink Extractor</p>
     <h1>Trích danh sách backlink từ file export</h1>
-    <p class="sub">Kéo thả file export SEO vào bên dưới. Công cụ hỗ trợ nhiều định dạng, tự nhận diện các cột backlink phổ biến và bạn vẫn có thể đổi sang bất kỳ cột nào trước khi Copy All.</p>
+    <p class="sub">Kéo thả file export SEO vào bên dưới. CSV/TSV/TXT/XLSX/XLSM/ODS được đọc trực tiếp trong trình duyệt, không cần Excel; bạn vẫn có thể đổi sang bất kỳ cột nào trước khi Copy All.</p>
   </header>
 
   <div class="drop" id="drop">
@@ -224,7 +224,7 @@
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
     </div>
     <div class="drop-title">Thả file vào đây, hoặc bấm để chọn</div>
-    <div class="drop-sub">.csv · .tsv · .txt · .xlsx · .xls · .xlsm · .xlsb · .ods</div>
+    <div class="drop-sub">.csv · .tsv · .txt · .xlsx · .xlsm · .ods · .xls · .xlsb</div>
   </div>
 
   <div class="filebar" id="filebar">
@@ -410,32 +410,377 @@ function parseDelimited(text, delimiter){
 }
 
 
-function ensureWorksheetRange(ws){
-  // Một số tool SEO export XLSX không ghi <dimension>, khiến SheetJS
-  // đọc được cell nhưng worksheet không có !ref và sheet_to_json trả rỗng.
-  if(ws['!ref']) return;
+function u16(view, offset){
+  return view.getUint16(offset, true);
+}
 
-  const cellKeys = Object.keys(ws).filter(k => k[0] !== '!');
-  if(cellKeys.length === 0) return;
+function u32(view, offset){
+  return view.getUint32(offset, true);
+}
 
-  let minR = Infinity, minC = Infinity, maxR = -1, maxC = -1;
-
-  cellKeys.forEach(address => {
-    try{
-      const cell = XLSX.utils.decode_cell(address);
-      minR = Math.min(minR, cell.r);
-      minC = Math.min(minC, cell.c);
-      maxR = Math.max(maxR, cell.r);
-      maxC = Math.max(maxC, cell.c);
-    }catch(_){}
-  });
-
-  if(maxR >= 0 && maxC >= 0){
-    ws['!ref'] = XLSX.utils.encode_range({
-      s: {r:minR, c:minC},
-      e: {r:maxR, c:maxC}
-    });
+function findZipEnd(view){
+  // EOCD can be up to 65,557 bytes from the end because ZIP comments are allowed.
+  const min = Math.max(0, view.byteLength - 65557);
+  for(let i = view.byteLength - 22; i >= min; i--){
+    if(u32(view, i) === 0x06054b50) return i;
   }
+  throw new Error('File Excel/ODS không có cấu trúc ZIP hợp lệ.');
+}
+
+function parseZipDirectory(buffer){
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  const eocd = findZipEnd(view);
+  const totalEntries = u16(view, eocd + 10);
+  const centralOffset = u32(view, eocd + 16);
+  const decoder = new TextDecoder('utf-8');
+  const entries = new Map();
+
+  let pos = centralOffset;
+  for(let i = 0; i < totalEntries; i++){
+    if(u32(view, pos) !== 0x02014b50){
+      throw new Error('Không đọc được danh mục file bên trong Excel.');
+    }
+
+    const method = u16(view, pos + 10);
+    const compressedSize = u32(view, pos + 20);
+    const uncompressedSize = u32(view, pos + 24);
+    const nameLen = u16(view, pos + 28);
+    const extraLen = u16(view, pos + 30);
+    const commentLen = u16(view, pos + 32);
+    const localOffset = u32(view, pos + 42);
+    const name = decoder.decode(bytes.slice(pos + 46, pos + 46 + nameLen));
+
+    entries.set(name, {
+      name,
+      method,
+      compressedSize,
+      uncompressedSize,
+      localOffset
+    });
+
+    pos += 46 + nameLen + extraLen + commentLen;
+  }
+
+  return {view, bytes, entries};
+}
+
+async function unzipEntry(zip, name){
+  const entry = zip.entries.get(name);
+  if(!entry) return null;
+
+  const {view, bytes} = zip;
+  const pos = entry.localOffset;
+
+  if(u32(view, pos) !== 0x04034b50){
+    throw new Error('File ZIP bên trong Excel bị lỗi.');
+  }
+
+  const nameLen = u16(view, pos + 26);
+  const extraLen = u16(view, pos + 28);
+  const dataStart = pos + 30 + nameLen + extraLen;
+  const compressed = bytes.slice(dataStart, dataStart + entry.compressedSize);
+
+  if(entry.method === 0){
+    return compressed;
+  }
+
+  if(entry.method === 8){
+    if(typeof DecompressionStream === 'undefined'){
+      throw new Error('Trình duyệt này quá cũ để giải nén XLSX. Hãy mở công cụ bằng Chrome hoặc Edge phiên bản mới.');
+    }
+
+    let stream;
+    try{
+      stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    }catch(_){
+      throw new Error('Trình duyệt không hỗ trợ giải nén XLSX trực tiếp. Hãy dùng Chrome/Edge phiên bản mới.');
+    }
+
+    const arr = await new Response(stream).arrayBuffer();
+    return new Uint8Array(arr);
+  }
+
+  throw new Error('Kiểu nén trong file Excel này chưa được hỗ trợ.');
+}
+
+function parseXml(text){
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  if(doc.getElementsByTagName('parsererror').length){
+    throw new Error('Không đọc được XML bên trong file.');
+  }
+  return doc;
+}
+
+function elementsByLocal(root, localName){
+  return Array.from(root.getElementsByTagNameNS('*', localName));
+}
+
+function directChildrenByLocal(root, names){
+  const wanted = new Set(Array.isArray(names) ? names : [names]);
+  return Array.from(root.childNodes).filter(
+    n => n.nodeType === 1 && wanted.has(n.localName)
+  );
+}
+
+function attrByLocal(el, localName){
+  if(!el || !el.attributes) return null;
+  for(const a of Array.from(el.attributes)){
+    if(a.localName === localName) return a.value;
+  }
+  return null;
+}
+
+function normalizeZipPath(baseDir, target){
+  let path = String(target || '').replace(/\\/g, '/');
+  if(path.startsWith('/')) path = path.slice(1);
+  else path = baseDir + path;
+
+  const out = [];
+  for(const part of path.split('/')){
+    if(!part || part === '.') continue;
+    if(part === '..') out.pop();
+    else out.push(part);
+  }
+  return out.join('/');
+}
+
+function colIndexFromAddress(address){
+  const m = String(address || '').match(/^([A-Z]+)\d+$/i);
+  if(!m) return -1;
+
+  let n = 0;
+  for(const ch of m[1].toUpperCase()){
+    n = n * 26 + (ch.charCodeAt(0) - 64);
+  }
+  return n - 1;
+}
+
+function xmlTextFromTNodes(node){
+  return elementsByLocal(node, 't').map(t => t.textContent || '').join('');
+}
+
+async function parseXlsxOffline(buffer){
+  const zip = parseZipDirectory(buffer);
+  const decoder = new TextDecoder('utf-8');
+
+  // Shared strings are optional.
+  let sharedStrings = [];
+  const sharedBytes = await unzipEntry(zip, 'xl/sharedStrings.xml');
+  if(sharedBytes){
+    const sharedDoc = parseXml(decoder.decode(sharedBytes));
+    sharedStrings = elementsByLocal(sharedDoc, 'si').map(si => xmlTextFromTNodes(si));
+  }
+
+  // Resolve the first visible worksheet through workbook relationships.
+  let sheetPath = null;
+  const workbookBytes = await unzipEntry(zip, 'xl/workbook.xml');
+  const relsBytes = await unzipEntry(zip, 'xl/_rels/workbook.xml.rels');
+
+  if(workbookBytes && relsBytes){
+    const workbookDoc = parseXml(decoder.decode(workbookBytes));
+    const relsDoc = parseXml(decoder.decode(relsBytes));
+    const sheet = elementsByLocal(workbookDoc, 'sheet')[0];
+
+    if(sheet){
+      const relId =
+        sheet.getAttribute('r:id') ||
+        attrByLocal(sheet, 'id');
+
+      const rel = elementsByLocal(relsDoc, 'Relationship')
+        .find(r => r.getAttribute('Id') === relId);
+
+      if(rel){
+        sheetPath = normalizeZipPath('xl/', rel.getAttribute('Target'));
+      }
+    }
+  }
+
+  // Fallback for unusual exports.
+  if(!sheetPath || !zip.entries.has(sheetPath)){
+    const candidates = Array.from(zip.entries.keys())
+      .filter(n => /^xl\/worksheets\/sheet[^/]*\.xml$/i.test(n))
+      .sort();
+    sheetPath = candidates[0] || null;
+  }
+
+  if(!sheetPath){
+    throw new Error('Không tìm thấy worksheet trong file XLSX.');
+  }
+
+  const sheetBytes = await unzipEntry(zip, sheetPath);
+  const sheetDoc = parseXml(decoder.decode(sheetBytes));
+  const out = [];
+
+  const rowNodes = elementsByLocal(sheetDoc, 'row');
+  for(const rowNode of rowNodes){
+    const row = [];
+
+    for(const cell of directChildrenByLocal(rowNode, 'c')){
+      const addr = cell.getAttribute('r');
+      const colIdx = colIndexFromAddress(addr);
+      if(colIdx < 0) continue;
+
+      const type = cell.getAttribute('t') || '';
+      let value = '';
+
+      if(type === 'inlineStr'){
+        const inline = directChildrenByLocal(cell, 'is')[0];
+        value = inline ? xmlTextFromTNodes(inline) : '';
+      }else{
+        const v = directChildrenByLocal(cell, 'v')[0];
+        const raw = v ? (v.textContent || '') : '';
+
+        if(type === 's'){
+          const idx = parseInt(raw, 10);
+          value = Number.isFinite(idx) && sharedStrings[idx] !== undefined
+            ? sharedStrings[idx]
+            : '';
+        }else if(type === 'b'){
+          value = raw === '1' ? 'TRUE' : 'FALSE';
+        }else{
+          value = raw;
+        }
+      }
+
+      while(row.length <= colIdx) row.push('');
+      row[colIdx] = value;
+    }
+
+    out.push(row);
+  }
+
+  return out;
+}
+
+async function parseOdsOffline(buffer){
+  const zip = parseZipDirectory(buffer);
+  const contentBytes = await unzipEntry(zip, 'content.xml');
+  if(!contentBytes){
+    throw new Error('Không tìm thấy content.xml trong file ODS.');
+  }
+
+  const doc = parseXml(new TextDecoder('utf-8').decode(contentBytes));
+  const table = elementsByLocal(doc, 'table')[0];
+  if(!table) throw new Error('Không tìm thấy bảng dữ liệu trong file ODS.');
+
+  const out = [];
+  const rowNodes = directChildrenByLocal(table, 'table-row');
+
+  for(const rowNode of rowNodes){
+    const repeatRows = Math.max(1, parseInt(attrByLocal(rowNode, 'number-rows-repeated') || '1', 10));
+    const row = [];
+    const cells = directChildrenByLocal(rowNode, ['table-cell', 'covered-table-cell']);
+
+    for(const cell of cells){
+      const repeatCols = Math.max(1, parseInt(attrByLocal(cell, 'number-columns-repeated') || '1', 10));
+      const ps = elementsByLocal(cell, 'p');
+      let value = ps.map(p => p.textContent || '').join('\n');
+
+      if(value === ''){
+        value =
+          attrByLocal(cell, 'string-value') ||
+          attrByLocal(cell, 'date-value') ||
+          attrByLocal(cell, 'time-value') ||
+          attrByLocal(cell, 'boolean-value') ||
+          attrByLocal(cell, 'value') ||
+          '';
+      }
+
+      // Avoid pathological repeated empty columns used only for formatting.
+      const safeRepeat = value === '' ? Math.min(repeatCols, 500) : Math.min(repeatCols, 10000);
+      for(let i = 0; i < safeRepeat; i++) row.push(value);
+    }
+
+    const safeRowRepeat = Math.min(repeatRows, 10000);
+    for(let i = 0; i < safeRowRepeat; i++) out.push([...row]);
+  }
+
+  return out;
+}
+
+async function loadSheetJsLegacy(){
+  if(typeof XLSX !== 'undefined') return true;
+
+  const urls = [
+    'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js',
+    'https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'
+  ];
+
+  for(const url of urls){
+    const ok = await new Promise(resolve => {
+      const script = document.createElement('script');
+      let finished = false;
+
+      const done = success => {
+        if(finished) return;
+        finished = true;
+        clearTimeout(timer);
+        script.onload = null;
+        script.onerror = null;
+        resolve(success);
+      };
+
+      const timer = setTimeout(() => done(false), 5000);
+      script.src = url;
+      script.async = true;
+      script.onload = () => done(typeof XLSX !== 'undefined');
+      script.onerror = () => done(false);
+      document.head.appendChild(script);
+    });
+
+    if(ok) return true;
+  }
+
+  return false;
+}
+
+async function parseLegacyExcel(buffer){
+  const loaded = await loadSheetJsLegacy();
+
+  if(!loaded){
+    throw new Error(
+      'File .XLS/.XLSB là định dạng Excel nhị phân cũ. XLSX/CSV đọc offline được, còn XLS/XLSB cần Internet để tải bộ đọc bổ sung.'
+    );
+  }
+
+  const data = new Uint8Array(buffer);
+  const wb = XLSX.read(data, {type:'array'});
+  const firstSheet = wb.SheetNames[0];
+  const ws = wb.Sheets[firstSheet];
+
+  // Repair missing worksheet range when necessary.
+  if(!ws['!ref']){
+    const keys = Object.keys(ws).filter(k => k[0] !== '!');
+    if(keys.length){
+      let minR = Infinity, minC = Infinity, maxR = -1, maxC = -1;
+
+      for(const address of keys){
+        try{
+          const cell = XLSX.utils.decode_cell(address);
+          minR = Math.min(minR, cell.r);
+          minC = Math.min(minC, cell.c);
+          maxR = Math.max(maxR, cell.r);
+          maxC = Math.max(maxC, cell.c);
+        }catch(_){}
+      }
+
+      if(maxR >= 0 && maxC >= 0){
+        ws['!ref'] = XLSX.utils.encode_range({
+          s:{r:minR,c:minC},
+          e:{r:maxR,c:maxC}
+        });
+      }
+    }
+  }
+
+  return XLSX.utils.sheet_to_json(ws, {
+    header:1,
+    defval:'',
+    raw:false,
+    blankrows:false
+  });
 }
 
 function handleFile(file){
@@ -449,11 +794,11 @@ function handleFile(file){
   const reader = new FileReader();
 
   reader.onerror = () => {
-    showError('Không đọc được file này. Hãy thử lại với file .csv, .tsv, .xlsx hoặc .xls.');
+    showError('Không đọc được file này.');
     panel.classList.remove('show');
   };
 
-  reader.onload = (e) => {
+  reader.onload = async (e) => {
     try{
       const buffer = e.target.result;
       const ext = getExtension(file.name);
@@ -462,28 +807,23 @@ function handleFile(file){
         const text = decodeTextBuffer(buffer);
         const delimiter = ext === 'tsv' ? '\t' : detectDelimiter(text);
         rows = parseDelimited(text, delimiter);
+
+      }else if(ext === 'xlsx' || ext === 'xlsm'){
+        rows = await parseXlsxOffline(buffer);
+
+      }else if(ext === 'ods'){
+        rows = await parseOdsOffline(buffer);
+
+      }else if(ext === 'xls' || ext === 'xlsb'){
+        rows = await parseLegacyExcel(buffer);
+
       }else{
-        if(typeof XLSX === 'undefined'){
-          throw new Error('Không tải được thư viện SheetJS để đọc file Excel. Hãy kiểm tra kết nối Internet hoặc dùng file CSV/TSV.');
-        }
-
-        const data = new Uint8Array(buffer);
-        const wb = XLSX.read(data, {type:'array'});
-        const firstSheet = wb.SheetNames[0];
-        const ws = wb.Sheets[firstSheet];
-
-        // Fix malformed/atypical SEO exports that omit worksheet dimensions.
-        ensureWorksheetRange(ws);
-
-        rows = XLSX.utils.sheet_to_json(ws, {
-          header:1,
-          defval:'',
-          raw:false,
-          blankrows:false
-        });
+        throw new Error('Định dạng này chưa được hỗ trợ.');
       }
 
-      rows = rows.filter(r => Array.isArray(r) && r.some(c => String(c).trim() !== ''));
+      rows = rows.filter(
+        r => Array.isArray(r) && r.some(c => String(c).trim() !== '')
+      );
 
       if(rows.length < 1){
         showError('File này không có dữ liệu đọc được.');
